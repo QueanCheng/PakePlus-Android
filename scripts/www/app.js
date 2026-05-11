@@ -1,6 +1,7 @@
 // Android-compatible version of app.js
 // Removed Electron dependencies (ipcRenderer, path, fs)
 // Using browser localStorage instead of file system
+// The code is written by QianCheng 2026.5.11
 
 let questions = [];
 
@@ -1598,6 +1599,409 @@ async function BackupData() {
     alert('备份失败：' + error.message);
   }
 }
+
+// 阿里云 OSS 配置
+
+
+// 上传备份到阿里云 OSS（使用签名 URL）
+async function UploadBackupToOSS() {
+  try {
+    // 检查是否启用了自动上传
+    if (!OSS_CONFIG.enableAutoUpload) {
+      alert('自动上传功能未启用');
+      return;
+    }
+    
+    // 使用文件选择对话框让用户选择要上传的备份文件
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.qye';
+    
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      // 显示上传进度提示
+      const loadingMsg = document.createElement('div');
+      loadingMsg.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 20px 40px;
+        border-radius: 10px;
+        font-size: 16px;
+        z-index: 9999;
+      `;
+      loadingMsg.innerHTML = '<i class="fa fa-spinner fa-spin"></i> 正在上传 ' + file.name + '...';
+      document.body.appendChild(loadingMsg);
+      
+      try {
+        // 生成 OSS 对象名称
+        const date = new Date();
+        const dateStr = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+        const objectName = `${OSS_CONFIG.folderPath}/${dateStr}/${file.name}`;
+        
+        // 使用新的安全上传方法
+        const result = await uploadToOSS(objectName, file, {
+          expiresIn: 300, // 5 分钟有效期
+          contentType: 'application/octet-stream'
+        });
+        
+        // 移除加载提示
+        document.body.removeChild(loadingMsg);
+        
+        if (result.success) {
+          alert(`✅ 上传成功！\n\n文件名称：${file.name}\nOSS 路径：${objectName}\n访问 URL: ${result.url}\n签名有效期：${new Date(result.expiration * 1000).toLocaleString()}`);
+        }
+      } catch (error) {
+        // 移除加载提示
+        if (loadingMsg.parentNode) {
+          document.body.removeChild(loadingMsg);
+        }
+        console.error('OSS 上传过程出错:', error);
+        alert('上传失败：' + error.message + '\n\n请确保 AccessKey 配置正确，或检查网络连接。');
+      }
+    };
+    
+    input.click();
+  } catch (error) {
+    console.error('OSS 上传过程出错:', error);
+    alert('上传失败：' + error.message);
+  }
+}
+
+// 从阿里云 OSS 同步数据（使用签名 URL）
+async function SyncFromOSS() {
+  try {
+    // 检查是否启用了自动上传
+    if (!OSS_CONFIG.enableAutoUpload) {
+      alert('自动上传功能未启用');
+      return;
+    }
+    
+    // 注意：列出 OSS 文件列表的操作仍然需要签名
+    // 这里我们简化处理，让用户直接输入要下载的文件名
+    
+    // 显示文件下载输入框
+    const objectName = prompt(
+      '请输入要下载的 OSS 文件路径（例如：backup/20260511/题目备份_20260511.qye）：\n\n' +
+      '格式：backup/YYYYMMDD/文件名.qye'
+    );
+    
+    if (!objectName) return;
+    
+    // 显示下载进度提示
+    const downloadMsg = document.createElement('div');
+    downloadMsg.id = 'downloadMsg';
+    downloadMsg.style.cssText = `
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 20px 40px;
+      border-radius: 10px;
+      font-size: 16px;
+      z-index: 9999;
+    `;
+    downloadMsg.innerHTML = `<i class="fa fa-spinner fa-spin"></i> 正在下载 ${objectName}...`;
+    document.body.appendChild(downloadMsg);
+    
+    try {
+      // 使用新的安全下载方法
+      const blob = await downloadFromOSS(objectName, { expiresIn: 300 });
+      
+      // 移除下载提示
+      document.body.removeChild(downloadMsg);
+      
+      // 读取文件内容
+      const arrayBuffer = await blob.arrayBuffer();
+      const base64Content = arrayBufferToBase64(arrayBuffer);
+      
+      // 解析备份文件内容
+      const buffer = base64ToArrayBuffer(base64Content);
+      const content = new TextDecoder('utf-8').decode(buffer);
+      const data = JSON.parse(content);
+      
+      let questionsToRestore = null;
+      
+      if (data.questions && Array.isArray(data.questions)) {
+        questionsToRestore = data.questions;
+      } else if (Array.isArray(data)) {
+        questionsToRestore = data;
+      }
+      
+      if (questionsToRestore === null) {
+        alert('无效的备份文件格式！');
+        return;
+      }
+      
+      // 恢复数据
+      const currentCount = questions.length;
+      questions = questionsToRestore;
+      await SaveQuestions();
+      UpdateDashboard();
+      
+      alert(`✅ 数据恢复成功！\n已覆盖原有 ${currentCount} 道题目，现共有 ${questions.length} 道题目。`);
+    } catch (error) {
+      // 移除下载提示
+      if (downloadMsg.parentNode) {
+        document.body.removeChild(downloadMsg);
+      }
+      console.error('OSS 下载过程出错:', error);
+      alert('下载失败：' + error.message + '\n\n请确保 AccessKey 配置正确，或检查网络连接。');
+    }
+    
+  } catch (error) {
+    console.error('OSS 同步过程出错:', error);
+    alert('同步失败：' + error.message);
+  }
+}
+
+// ==================== OSS 安全访问工具函数 ====================
+
+/**
+ * 计算 MD5（使用浏览器 Crypto API）
+ * @param {ArrayBuffer} arrayBuffer - 文件内容的 ArrayBuffer
+ * @returns {Promise<string>} Base64 编码的 MD5 值
+ */
+async function calculateMD5(arrayBuffer) {
+  try {
+    // 使用 Web Crypto API 计算 MD5
+    const hashBuffer = await crypto.subtle.digest('MD5', arrayBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return btoa(hashHex);
+  } catch (error) {
+    console.error('MD5 计算失败:', error);
+    // 降级方案：返回空字符串（OSS 不强制要求 MD5）
+    return '';
+  }
+}
+
+/**
+ * 生成 OSS 签名
+ * @param {string} method - HTTP 方法
+ * @param {string} objectKey - OSS 对象名称
+ * @param {string} contentType - 内容类型
+ * @param {number} expiration - 过期时间戳
+ * @returns {Promise<string>} Base64 编码的签名
+ */
+async function generateOSSSignature(method, objectKey, contentType, expiration) {
+  const canonicalizedOSSHeaders = '';
+  const canonicalizedResource = `/${OSS_CONFIG.bucket}/${objectKey}`;
+  const stringToSign = `${method}\n\n${contentType}\n${expiration}\n${canonicalizedOSSHeaders}${canonicalizedResource}`;
+  
+  // 使用 Web Crypto API 计算 HMAC-SHA1 签名
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(OSS_CONFIG.accessKeySecret);
+  const messageData = encoder.encode(stringToSign);
+  
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      keyData,
+      { name: 'HMAC', hash: 'SHA-1' },
+      false,
+      ['sign']
+    );
+    
+    const signature = await crypto.subtle.sign('HMAC', key, messageData);
+    return btoa(String.fromCharCode(...new Uint8Array(signature)));
+  } catch (error) {
+    console.error('签名计算失败:', error);
+    throw new Error('无法计算 OSS 签名：' + error.message);
+  }
+}
+
+/**
+ * 生成上传签名 URL
+ * @param {string} objectKey - OSS 对象名称
+ * @param {number} expiresIn - 过期时间（秒）
+ * @param {string} contentType - 文件类型
+ * @returns {Promise<Object>} 签名 URL 信息
+ */
+async function getUploadSignature(objectKey, expiresIn = 300, contentType = 'application/octet-stream') {
+  const now = Math.floor(Date.now() / 1000);
+  const expiration = now + expiresIn;
+  const signature = await generateOSSSignature('PUT', objectKey, contentType, expiration);
+  
+  return {
+    url: `https://${OSS_CONFIG.bucket}.${OSS_CONFIG.region}.aliyuncs.com/${objectKey}`,
+    signedUrl: `https://${OSS_CONFIG.bucket}.${OSS_CONFIG.region}.aliyuncs.com/${objectKey}?OSSAccessKeyId=${OSS_CONFIG.accessKeyId}&Expires=${expiration}&Signature=${encodeURIComponent(signature)}`,
+    expiration: expiration
+  };
+}
+
+/**
+ * 生成下载签名 URL
+ * @param {string} objectKey - OSS 对象名称
+ * @param {number} expiresIn - 过期时间（秒）
+ * @returns {Promise<Object>} 签名 URL 信息
+ */
+async function getDownloadSignature(objectKey, expiresIn = 300) {
+  const now = Math.floor(Date.now() / 1000);
+  const expiration = now + expiresIn;
+  const signature = await generateOSSSignature('GET', objectKey, '', expiration);
+  
+  return {
+    url: `https://${OSS_CONFIG.bucket}.${OSS_CONFIG.region}.aliyuncs.com/${objectKey}`,
+    signedUrl: `https://${OSS_CONFIG.bucket}.${OSS_CONFIG.region}.aliyuncs.com/${objectKey}?OSSAccessKeyId=${OSS_CONFIG.accessKeyId}&Expires=${expiration}&Signature=${encodeURIComponent(signature)}`,
+    expiration: expiration
+  };
+}
+
+/**
+ * 上传文件到 OSS（使用签名 URL）
+ * @param {string} objectKey - OSS 对象名称
+ * @param {Blob|File} file - 文件对象
+ * @param {Object} options - 选项
+ * @returns {Promise<Object>} 上传结果
+ */
+async function uploadToOSS(objectKey, file, options = {}) {
+  const {
+    expiresIn = 300,
+    contentType = file.type || 'application/octet-stream'
+  } = options;
+
+  try {
+    console.log('开始上传文件到 OSS...');
+    console.log('文件路径:', objectKey);
+    console.log('文件大小:', file.size, 'bytes');
+    console.log('文件类型:', contentType);
+    
+    // 获取签名 URL
+    const signature = await getUploadSignature(objectKey, expiresIn, contentType);
+    
+    console.log('签名 URL 获取成功');
+    if (signature && signature.signedUrl) {
+      console.log('签名 URL:', signature.signedUrl.substring(0, 100) + '...');
+      console.log('过期时间:', new Date(signature.expiration * 1000).toLocaleString());
+    } else {
+      console.error('签名 URL 无效:', signature);
+      throw new Error('签名服务器返回了无效的签名 URL');
+    }
+    
+    // 计算文件 MD5
+    const arrayBuffer = await file.arrayBuffer();
+    const md5 = await calculateMD5(arrayBuffer);
+    
+    console.log('文件 MD5:', md5);
+
+    // 上传文件
+    console.log('开始发送 PUT 请求到 OSS...');
+    const response = await fetch(signature.signedUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': contentType,
+        'Content-MD5': md5 || ''  // 如果 MD5 计算失败，使用空字符串
+      },
+      body: arrayBuffer
+    });
+
+    console.log('OSS 响应状态:', response.status);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OSS 返回错误:', errorText);
+      throw new Error(`上传失败：${response.status} ${response.statusText}\n${errorText}`);
+    }
+
+    console.log('✅ 文件上传成功！');
+    
+    return {
+      success: true,
+      url: signature.url,
+      objectKey: objectKey,
+      expiration: signature.expiration
+    };
+  } catch (error) {
+    console.error('❌ OSS 上传失败:', error);
+    console.error('错误堆栈:', error.stack);
+    throw error;
+  }
+}
+
+/**
+ * 从 OSS 下载文件（使用签名 URL）
+ * @param {string} objectKey - OSS 对象名称
+ * @param {Object} options - 选项
+ * @returns {Promise<Blob>} 文件 Blob 对象
+ */
+async function downloadFromOSS(objectKey, options = {}) {
+  const { expiresIn = 300 } = options;
+
+  try {
+    // 获取签名 URL
+    const signature = await getDownloadSignature(objectKey, expiresIn);
+
+    // 下载文件
+    const response = await fetch(signature.signedUrl);
+
+    if (!response.ok) {
+      throw new Error(`下载失败：${response.status} ${response.statusText}`);
+    }
+
+    return await response.blob();
+  } catch (error) {
+    console.error('OSS 下载失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 从 OSS 下载 JSON 文件
+ * @param {string} objectKey - OSS 对象名称
+ * @param {Object} options - 选项
+ * @returns {Promise<Object>} 解析后的 JSON 对象
+ */
+async function downloadJSONFromOSS(objectKey, options = {}) {
+  const blob = await downloadFromOSS(objectKey, options);
+  const text = await blob.text();
+  return JSON.parse(text);
+}
+
+// ==================== 原有的辅助函数 ====================
+
+// 辅助函数：读取文件为 ArrayBuffer
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// 辅助函数：ArrayBuffer 转 Base64
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
+// 辅助函数：Base64 转 ArrayBuffer
+function base64ToArrayBuffer(base64) {
+  const binary_string = window.atob(base64);
+  const len = binary_string.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary_string.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+// 导出函数到全局作用域
+window.UploadBackupToOSS = UploadBackupToOSS;
+window.SyncFromOSS = SyncFromOSS;
 
 async function RestoreData() {
   try {
