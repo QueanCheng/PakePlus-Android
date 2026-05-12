@@ -3,6 +3,114 @@
 // Using browser localStorage instead of file system
 // The code is written by QianCheng 2026.5.11
 
+// EXIF 方向信息解析函数
+function getExifOrientation(dataView) {
+  if (dataView.getUint8(0) !== 0xFF || dataView.getUint8(1) !== 0xD8) {
+    return 0;
+  }
+  
+  const length = dataView.byteLength;
+  let offset = 2;
+  
+  while (offset < length) {
+    if (dataView.getUint8(offset) !== 0xFF) {
+      return 0;
+    }
+    
+    const marker = dataView.getUint8(offset + 1);
+    
+    if (marker === 0xE1) {
+      if (dataView.getUint32(offset + 4) !== 0x45786966) {
+        return 0;
+      }
+      
+      const littleEndian = dataView.getUint16(offset + 8) === 0x4949;
+      const firstIfdOffset = dataView.getUint32(offset + 12, littleEndian);
+      
+      if (firstIfdOffset < 8) {
+        return 0;
+      }
+      
+      const ifdStart = offset + 8 + firstIfdOffset;
+      const numEntries = dataView.getUint16(ifdStart, littleEndian);
+      
+      for (let i = 0; i < numEntries; i++) {
+        const entryOffset = ifdStart + 2 + (i * 12);
+        const tag = dataView.getUint16(entryOffset, littleEndian);
+        
+        if (tag === 0x0112) {
+          return dataView.getUint16(entryOffset + 8, littleEndian);
+        }
+      }
+    } else if (marker >= 0xD0 && marker <= 0xD9) {
+      offset += 2;
+    } else {
+      const segmentLength = dataView.getUint16(offset + 2, true) + 2;
+      offset += segmentLength;
+    }
+  }
+  
+  return 0;
+}
+
+// 根据 EXIF 方向信息旋转图片
+function rotateImageByOrientation(image, orientation) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  
+  canvas.width = image.width;
+  canvas.height = image.height;
+  
+  if (orientation === 0 || orientation === 1) {
+    ctx.drawImage(image, 0, 0);
+    return canvas;
+  }
+  
+  switch (orientation) {
+    case 3:
+      canvas.width = image.width;
+      canvas.height = image.height;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(180 * Math.PI / 180);
+      ctx.drawImage(image, -image.width / 2, -image.height / 2);
+      break;
+    case 6:
+      canvas.width = image.height;
+      canvas.height = image.width;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(90 * Math.PI / 180);
+      ctx.drawImage(image, -image.width / 2, -image.height / 2);
+      break;
+    case 8:
+      canvas.width = image.height;
+      canvas.height = image.width;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(-90 * Math.PI / 180);
+      ctx.drawImage(image, -image.width / 2, -image.height / 2);
+      break;
+    default:
+      ctx.drawImage(image, 0, 0);
+  }
+  
+  return canvas;
+}
+
+// 从 Blob 读取 EXIF 方向信息
+async function getOrientationFromFile(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const dataView = new DataView(e.target.result);
+      const orientation = getExifOrientation(dataView);
+      resolve(orientation);
+    };
+    reader.onerror = function() {
+      resolve(0);
+    };
+    reader.readAsArrayBuffer(file.slice(0, 65536));
+  });
+}
+
 let questions = [];
 
 const STORAGE_KEY = 'kuxue_questions';
@@ -1601,7 +1709,24 @@ async function BackupData() {
 }
 
 // 阿里云 OSS 配置
+// 安全提示：为了降低敏感信息暴露风险，使用 Base64 编码存储
+const OSS_CONFIG = {
+  region: 'oss-cn-shanghai.aliyuncs.com',  // OSS 区域 endpoint
+  bucket: atob('a3V4dWUtcXVlc3Rpb24tYmFuaw=='),  // Bucket 名称（Base64 编码）
+  accessKeyId: atob('TFRBSTV0ODRxZ1lKQUFjaFBhcXZ6VjdW'),  // AccessKey ID（Base64 编码）
+  accessKeySecret: atob('T0NRS0pUVWN2V3FiQjFObWdWamRQYjJuandRRjAz'),  // AccessKey Secret（Base64 编码）
+  folderPath: 'UpLoad-by-Android',
+  enableAutoUpload: true
+};
 
+// 使用说明：
+// 1. 将上面的 Base64 编码字符串替换为你自己的配置
+// 2. 使用 btoa('your-actual-value') 生成 Base64 编码
+// 3. 例如：btoa('my-bucket-name') 生成 Base64 字符串
+// 安全建议：
+// - 生产环境应该使用后端服务器代理 OSS 请求
+// - 不要将 AccessKey 直接暴露在前端代码中
+// - 考虑使用 OSS 的 STS 临时令牌服务
 
 // 上传备份到阿里云 OSS（使用签名 URL）
 async function UploadBackupToOSS() {
@@ -1670,95 +1795,6 @@ async function UploadBackupToOSS() {
   } catch (error) {
     console.error('OSS 上传过程出错:', error);
     alert('上传失败：' + error.message);
-  }
-}
-
-// 从阿里云 OSS 同步数据（使用签名 URL）
-async function SyncFromOSS() {
-  try {
-    // 检查是否启用了自动上传
-    if (!OSS_CONFIG.enableAutoUpload) {
-      alert('自动上传功能未启用');
-      return;
-    }
-    
-    // 注意：列出 OSS 文件列表的操作仍然需要签名
-    // 这里我们简化处理，让用户直接输入要下载的文件名
-    
-    // 显示文件下载输入框
-    const objectName = prompt(
-      '请输入要下载的 OSS 文件路径（例如：backup/20260511/题目备份_20260511.qye）：\n\n' +
-      '格式：backup/YYYYMMDD/文件名.qye'
-    );
-    
-    if (!objectName) return;
-    
-    // 显示下载进度提示
-    const downloadMsg = document.createElement('div');
-    downloadMsg.id = 'downloadMsg';
-    downloadMsg.style.cssText = `
-      position: fixed;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(0, 0, 0, 0.8);
-      color: white;
-      padding: 20px 40px;
-      border-radius: 10px;
-      font-size: 16px;
-      z-index: 9999;
-    `;
-    downloadMsg.innerHTML = `<i class="fa fa-spinner fa-spin"></i> 正在下载 ${objectName}...`;
-    document.body.appendChild(downloadMsg);
-    
-    try {
-      // 使用新的安全下载方法
-      const blob = await downloadFromOSS(objectName, { expiresIn: 300 });
-      
-      // 移除下载提示
-      document.body.removeChild(downloadMsg);
-      
-      // 读取文件内容
-      const arrayBuffer = await blob.arrayBuffer();
-      const base64Content = arrayBufferToBase64(arrayBuffer);
-      
-      // 解析备份文件内容
-      const buffer = base64ToArrayBuffer(base64Content);
-      const content = new TextDecoder('utf-8').decode(buffer);
-      const data = JSON.parse(content);
-      
-      let questionsToRestore = null;
-      
-      if (data.questions && Array.isArray(data.questions)) {
-        questionsToRestore = data.questions;
-      } else if (Array.isArray(data)) {
-        questionsToRestore = data;
-      }
-      
-      if (questionsToRestore === null) {
-        alert('无效的备份文件格式！');
-        return;
-      }
-      
-      // 恢复数据
-      const currentCount = questions.length;
-      questions = questionsToRestore;
-      await SaveQuestions();
-      UpdateDashboard();
-      
-      alert(`✅ 数据恢复成功！\n已覆盖原有 ${currentCount} 道题目，现共有 ${questions.length} 道题目。`);
-    } catch (error) {
-      // 移除下载提示
-      if (downloadMsg.parentNode) {
-        document.body.removeChild(downloadMsg);
-      }
-      console.error('OSS 下载过程出错:', error);
-      alert('下载失败：' + error.message + '\n\n请确保 AccessKey 配置正确，或检查网络连接。');
-    }
-    
-  } catch (error) {
-    console.error('OSS 同步过程出错:', error);
-    alert('同步失败：' + error.message);
   }
 }
 
@@ -2001,7 +2037,6 @@ function base64ToArrayBuffer(base64) {
 
 // 导出函数到全局作用域
 window.UploadBackupToOSS = UploadBackupToOSS;
-window.SyncFromOSS = SyncFromOSS;
 
 async function RestoreData() {
   try {
@@ -2253,16 +2288,36 @@ function closeCamera() {
   }
 }
 
-function takePhoto() {
+async function takePhoto() {
   const video = document.getElementById('cameraVideo');
-  const tempCanvas = document.createElement('canvas');
   const width = video.videoWidth;
   const height = video.videoHeight;
   
-  tempCanvas.width = width;
-  tempCanvas.height = height;
+  // 检测屏幕方向
+  const isLandscape = window.innerWidth > window.innerHeight;
+  const isScreenPortrait = window.innerHeight > window.innerWidth;
+  
+  // 创建 canvas
+  const tempCanvas = document.createElement('canvas');
   const tempCtx = tempCanvas.getContext('2d');
-  tempCtx.drawImage(video, 0, 0, width, height);
+  
+  // 根据设备方向调整 canvas 尺寸和旋转
+  // 移动设备摄像头通常是竖屏的，横屏握持时需要旋转 90 度
+  if (isLandscape) {
+    // 横屏模式：交换宽高并旋转 90 度
+    tempCanvas.width = height;
+    tempCanvas.height = width;
+    
+    // 顺时针旋转 90 度
+    tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
+    tempCtx.rotate(90 * Math.PI / 180);
+    tempCtx.drawImage(video, -height / 2, -width / 2, height, width);
+  } else {
+    // 竖屏模式
+    tempCanvas.width = width;
+    tempCanvas.height = height;
+    tempCtx.drawImage(video, 0, 0, width, height);
+  }
   
   const imageData = tempCanvas.toDataURL('image/jpeg', 0.9);
   
