@@ -121,6 +121,7 @@ async function initApp() {
   await LoadQuestions();
   UpdateDashboard();
   ShowPanel('dashboard');
+  initUploadList();
 }
 
 function initEventListeners() {
@@ -1729,6 +1730,8 @@ const OSS_CONFIG = {
 // - 考虑使用 OSS 的 STS 临时令牌服务
 
 // 上传备份到阿里云 OSS（使用签名 URL）
+const UPLOAD_HISTORY_KEY = 'kuxue_upload_history';
+
 async function UploadBackupToOSS() {
   try {
     // 检查是否启用了自动上传
@@ -1779,6 +1782,18 @@ async function UploadBackupToOSS() {
         document.body.removeChild(loadingMsg);
         
         if (result.success) {
+          // 记录上传历史
+          saveUploadHistory({
+            fileName: file.name,
+            objectName: objectName,
+            url: result.url,
+            uploadTime: new Date().toISOString(),
+            size: file.size
+          });
+          
+          // 刷新上传列表显示
+          updateUploadList();
+          
           alert(`✅ 上传成功！\n\n文件名称：${file.name}\nOSS 路径：${objectName}\n访问 URL: ${result.url}\n签名有效期：${new Date(result.expiration * 1000).toLocaleString()}`);
         }
       } catch (error) {
@@ -1796,6 +1811,106 @@ async function UploadBackupToOSS() {
     console.error('OSS 上传过程出错:', error);
     alert('上传失败：' + error.message);
   }
+}
+
+// 保存上传历史
+function saveUploadHistory(record) {
+  try {
+    const history = JSON.parse(localStorage.getItem(UPLOAD_HISTORY_KEY) || '[]');
+    history.unshift(record); // 添加到开头
+    
+    // 只保留最近 20 条记录
+    if (history.length > 20) {
+      history.splice(20);
+    }
+    
+    localStorage.setItem(UPLOAD_HISTORY_KEY, JSON.stringify(history));
+  } catch (error) {
+    console.error('保存上传历史失败:', error);
+  }
+}
+
+// 获取上传历史
+function getUploadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(UPLOAD_HISTORY_KEY) || '[]');
+  } catch (error) {
+    console.error('读取上传历史失败:', error);
+    return [];
+  }
+}
+
+// 更新上传列表显示
+function updateUploadList() {
+  const listContainer = document.getElementById('uploadHistoryList');
+  if (!listContainer) return;
+  
+  const history = getUploadHistory();
+  
+  if (history.length === 0) {
+    listContainer.innerHTML = '<p style="color: #999; text-align: center; padding: 20px;">暂无上传记录</p>';
+    return;
+  }
+  
+  let html = '';
+  history.forEach((record, index) => {
+    const uploadTime = new Date(record.uploadTime).toLocaleString('zh-CN');
+    const fileSize = formatFileSize(record.size);
+    
+    html += `<div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; margin-bottom: 8px; background: #f8f9fa;">`;
+    html += `<div style="display: flex; justify-content: space-between; align-items: center;">`;
+    html += `<div style="flex: 1;">`;
+    html += `<strong style="color: #333; font-size: 14px;">${record.fileName}</strong>`;
+    html += `<br><small style="color: #666;">上传时间：${uploadTime}</small>`;
+    html += `<br><small style="color: #666;">文件大小：${fileSize}</small>`;
+    html += `</div>`;
+    html += `<div style="margin-left: 10px;">`;
+    html += `<button onclick="copyUploadUrl('${record.url}')" style="background: #4169E1; color: white; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px;">复制URL</button>`;
+    html += `</div>`;
+    html += `</div>`;
+    html += `</div>`;
+  });
+  
+  listContainer.innerHTML = html;
+}
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+// 复制上传 URL
+function copyUploadUrl(url) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(() => {
+      alert('URL 已复制到剪贴板');
+    }).catch(() => {
+      // 降级方案
+      const input = document.createElement('input');
+      input.value = url;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+      alert('URL 已复制到剪贴板');
+    });
+  } else {
+    // 降级方案
+    const input = document.createElement('input');
+    input.value = url;
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    document.body.removeChild(input);
+    alert('URL 已复制到剪贴板');
+  }
+}
+
+// 初始化上传列表
+function initUploadList() {
+  updateUploadList();
 }
 
 // ==================== OSS 安全访问工具函数 ====================
@@ -2290,34 +2405,22 @@ function closeCamera() {
 
 async function takePhoto() {
   const video = document.getElementById('cameraVideo');
-  const width = video.videoWidth;
-  const height = video.videoHeight;
-  
-  // 检测屏幕方向
-  const isLandscape = window.innerWidth > window.innerHeight;
-  const isScreenPortrait = window.innerHeight > window.innerWidth;
+  let width = video.videoWidth;
+  let height = video.videoHeight;
   
   // 创建 canvas
   const tempCanvas = document.createElement('canvas');
   const tempCtx = tempCanvas.getContext('2d');
   
-  // 根据设备方向调整 canvas 尺寸和旋转
-  // 移动设备摄像头通常是竖屏的，横屏握持时需要旋转 90 度
-  if (isLandscape) {
-    // 横屏模式：交换宽高并旋转 90 度
-    tempCanvas.width = height;
-    tempCanvas.height = width;
-    
-    // 顺时针旋转 90 度
-    tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
-    tempCtx.rotate(90 * Math.PI / 180);
-    tempCtx.drawImage(video, -height / 2, -width / 2, height, width);
-  } else {
-    // 竖屏模式
-    tempCanvas.width = width;
-    tempCanvas.height = height;
-    tempCtx.drawImage(video, 0, 0, width, height);
-  }
+  // 移动端摄像头默认是竖屏的，需要逆时针旋转 90 度来修正方向
+  // 交换宽高并逆时针旋转 90 度
+  tempCanvas.width = height;
+  tempCanvas.height = width;
+  
+  // 逆时针旋转 90 度修正图片方向
+  tempCtx.translate(height / 2, width / 2);
+  tempCtx.rotate(-90 * Math.PI / 180);
+  tempCtx.drawImage(video, -width / 2, -height / 2, width, height);
   
   const imageData = tempCanvas.toDataURL('image/jpeg', 0.9);
   
