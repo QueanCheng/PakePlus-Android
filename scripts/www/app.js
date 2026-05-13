@@ -1740,30 +1740,39 @@ async function UploadBackupToOSS() {
       return;
     }
     
-    // 使用文件选择对话框让用户选择要上传的备份文件
+    // 创建文件选择器，与恢复数据功能保持一致的交互方式
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.qye';
+    input.accept = '.qye';  // 仅接受 .qye 备份文件
     
     input.onchange = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
       
+      // 验证文件类型
+      if (!file.name.endsWith('.qye')) {
+        alert('请选择正确的备份文件（.qye 格式）！');
+        return;
+      }
+      
       // 显示上传进度提示
       const loadingMsg = document.createElement('div');
+      loadingMsg.id = 'ossUploadLoading';
       loadingMsg.style.cssText = `
         position: fixed;
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        background: rgba(0, 0, 0, 0.8);
+        background: rgba(0, 0, 0, 0.85);
         color: white;
-        padding: 20px 40px;
-        border-radius: 10px;
+        padding: 25px 50px;
+        border-radius: 15px;
         font-size: 16px;
-        z-index: 9999;
+        z-index: 10000;
+        text-align: center;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.3);
       `;
-      loadingMsg.innerHTML = '<i class="fa fa-spinner fa-spin"></i> 正在上传 ' + file.name + '...';
+      loadingMsg.innerHTML = '<div style="margin-bottom: 15px;"><i class="fa fa-spinner fa-spin" style="font-size: 24px;"></i></div>正在上传到阿里云 OSS...<br><small style="color: #aaa;">' + file.name + '</small>';
       document.body.appendChild(loadingMsg);
       
       try {
@@ -1772,14 +1781,16 @@ async function UploadBackupToOSS() {
         const dateStr = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
         const objectName = `${OSS_CONFIG.folderPath}/${dateStr}/${file.name}`;
         
-        // 使用新的安全上传方法
+        // 上传文件
         const result = await uploadToOSS(objectName, file, {
           expiresIn: 300, // 5 分钟有效期
           contentType: 'application/octet-stream'
         });
         
         // 移除加载提示
-        document.body.removeChild(loadingMsg);
+        if (loadingMsg.parentNode) {
+          document.body.removeChild(loadingMsg);
+        }
         
         if (result.success) {
           // 记录上传历史
@@ -1794,7 +1805,7 @@ async function UploadBackupToOSS() {
           // 刷新上传列表显示
           updateUploadList();
           
-          alert(`✅ 上传成功！\n\n文件名称：${file.name}\nOSS 路径：${objectName}\n访问 URL: ${result.url}\n签名有效期：${new Date(result.expiration * 1000).toLocaleString()}`);
+          alert(`✅ 上传成功！\n\n文件名称：${file.name}\nOSS 路径：${objectName}\n上传时间：${new Date().toLocaleString('zh-CN')}`);
         }
       } catch (error) {
         // 移除加载提示
@@ -1802,11 +1813,13 @@ async function UploadBackupToOSS() {
           document.body.removeChild(loadingMsg);
         }
         console.error('OSS 上传过程出错:', error);
-        alert('上传失败：' + error.message + '\n\n请确保 AccessKey 配置正确，或检查网络连接。');
+        alert('上传失败：' + error.message + '\n\n请检查网络连接和 OSS 配置。');
       }
     };
     
+    // 触发文件选择对话框
     input.click();
+    
   } catch (error) {
     console.error('OSS 上传过程出错:', error);
     alert('上传失败：' + error.message);
